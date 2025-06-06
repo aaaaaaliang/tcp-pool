@@ -1,4 +1,4 @@
-package main
+package tcpPool
 
 import (
 	"context"
@@ -15,11 +15,6 @@ type TCPPoolConn struct {
 	pool      chan *PoolConnWrapper
 	maxConns  int64
 	currConns int64 // 当前总连接数
-}
-
-type PoolConnWrapper struct {
-	conn     net.Conn
-	lastUsed time.Time
 }
 
 func NewTCPConnPool(addr string, maxConns int64) *TCPPoolConn {
@@ -74,22 +69,10 @@ func (p *TCPPoolConn) newConn() (net.Conn, error) {
 	return conn, nil
 }
 
-func (p *TCPPoolConn) Stats() (max int64, current int64, idle int64) {
+func (p *TCPPoolConn) Stats() (int64, int64, int64) {
 	return p.maxConns,
 		atomic.LoadInt64(&p.currConns),
 		int64(len(p.pool))
-}
-
-func isDead(conn net.Conn) bool {
-	if conn == nil {
-		return true
-	}
-	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Millisecond))
-	if _, err := conn.Write([]byte{}); err != nil {
-		return true
-	}
-	_ = conn.SetWriteDeadline(time.Time{})
-	return false
 }
 
 func (p *TCPPoolConn) StartCleaner(ctx context.Context, interval time.Duration, ttl time.Duration) {
@@ -116,16 +99,27 @@ func (p *TCPPoolConn) cleanExpired(ttl time.Duration) {
 				wrapper.conn.Close()
 				atomic.AddInt64(&p.currConns, -1)
 				continue
-			} else {
-				select {
-				case p.pool <- wrapper:
-				default:
-					wrapper.conn.Close()
-					atomic.AddInt64(&p.currConns, -1)
-				}
+			}
+			select {
+			case p.pool <- wrapper:
+			default:
+				wrapper.conn.Close()
+				atomic.AddInt64(&p.currConns, -1)
 			}
 		default:
 			return
 		}
 	}
+}
+
+func isDead(conn net.Conn) bool {
+	if conn == nil {
+		return true
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Millisecond))
+	if _, err := conn.Write([]byte{}); err != nil {
+		return true
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
+	return false
 }
