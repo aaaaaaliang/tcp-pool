@@ -11,27 +11,33 @@ import (
 type TCPPoolConn struct {
 	mu        sync.Mutex
 	addr      string
-	pool      chan net.Conn
+	pool      chan *PoolConnWrapper
 	maxConns  int64
 	currConns int64 // 当前总连接数
+}
+
+type PoolConnWrapper struct {
+	conn     net.Conn
+	lastUsed time.Time
 }
 
 func NewTCPConnPool(addr string, maxConns int64) *TCPPoolConn {
 	return &TCPPoolConn{
 		addr:     addr,
-		pool:     make(chan net.Conn, maxConns),
+		pool:     make(chan *PoolConnWrapper, maxConns),
 		maxConns: maxConns,
 	}
 }
 
 func (p *TCPPoolConn) Get() (net.Conn, error) {
 	select {
-	case conn := <-p.pool:
-		if isDead(conn) {
-			conn.Close()
+	case wrapper := <-p.pool:
+		if isDead(wrapper.conn) || time.Since(wrapper.lastUsed) > time.Minute {
+			wrapper.conn.Close()
+			atomic.AddInt64(&p.currConns, -1)
 			return p.newConn()
 		}
-		return conn, nil
+		return wrapper.conn, nil
 	default:
 		return p.newConn()
 	}
@@ -41,8 +47,12 @@ func (p *TCPPoolConn) Put(conn net.Conn) error {
 	if conn == nil {
 		return errors.New("nil connection")
 	}
+	wrapper := &PoolConnWrapper{
+		conn:     conn,
+		lastUsed: time.Now(),
+	}
 	select {
-	case p.pool <- conn:
+	case p.pool <- wrapper:
 		return nil
 	default:
 		conn.Close()
@@ -52,10 +62,9 @@ func (p *TCPPoolConn) Put(conn net.Conn) error {
 }
 
 func (p *TCPPoolConn) newConn() (net.Conn, error) {
-	if atomic.LoadInt64(&p.currConns) > p.maxConns {
+	if atomic.LoadInt64(&p.currConns) >= p.maxConns {
 		return nil, errors.New("当前连接数超过最大允许连接数")
 	}
-
 	conn, err := net.DialTimeout("tcp", p.addr, 2*time.Second)
 	if err != nil {
 		return nil, err
@@ -68,18 +77,10 @@ func isDead(conn net.Conn) bool {
 	if conn == nil {
 		return true
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-	//var buf [1]byte
-	//_, err := conn.Read(buf[:])
-	//if err != nil {
-	//	if e, ok := err.(net.Error); ok && e.Timeout() {
-	//		_ = conn.SetReadDeadline(time.Time{})
-	//		return false
-	//	}
-	//	return true
-	//}
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Millisecond))
 	if _, err := conn.Write([]byte{}); err != nil {
 		return true
 	}
+	_ = conn.SetWriteDeadline(time.Time{})
 	return false
 }
