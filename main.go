@@ -65,14 +65,20 @@ func (p *TCPPoolConn) newConn() (net.Conn, error) {
 }
 
 func isDead(conn net.Conn) bool {
+	if conn == nil {
+		return true
+	}
 	_ = conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-	var buf [1]byte
-	_, err := conn.Read(buf[:])
-	if err != nil {
-		if e, ok := err.(net.Error); ok && e.Timeout() {
-			_ = conn.SetReadDeadline(time.Time{})
-			return false
-		}
+	//var buf [1]byte
+	//_, err := conn.Read(buf[:])
+	//if err != nil {
+	//	if e, ok := err.(net.Error); ok && e.Timeout() {
+	//		_ = conn.SetReadDeadline(time.Time{})
+	//		return false
+	//	}
+	//	return true
+	//}
+	if _, err := conn.Write([]byte{}); err != nil {
 		return true
 	}
 	return false
