@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net"
 	"sync"
@@ -73,6 +74,12 @@ func (p *TCPPoolConn) newConn() (net.Conn, error) {
 	return conn, nil
 }
 
+func (p *TCPPoolConn) Stats() (max int64, current int64, idle int64) {
+	return p.maxConns,
+		atomic.LoadInt64(&p.currConns),
+		int64(len(p.pool))
+}
+
 func isDead(conn net.Conn) bool {
 	if conn == nil {
 		return true
@@ -83,4 +90,42 @@ func isDead(conn net.Conn) bool {
 	}
 	_ = conn.SetWriteDeadline(time.Time{})
 	return false
+}
+
+func (p *TCPPoolConn) StartCleaner(ctx context.Context, interval time.Duration, ttl time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				p.cleanExpired(ttl)
+			}
+		}
+	}()
+}
+
+func (p *TCPPoolConn) cleanExpired(ttl time.Duration) {
+	for {
+		select {
+		case wrapper := <-p.pool:
+			if time.Since(wrapper.lastUsed) > ttl || isDead(wrapper.conn) {
+				wrapper.conn.Close()
+				atomic.AddInt64(&p.currConns, -1)
+				continue
+			} else {
+				select {
+				case p.pool <- wrapper:
+				default:
+					wrapper.conn.Close()
+					atomic.AddInt64(&p.currConns, -1)
+				}
+			}
+		default:
+			return
+		}
+	}
 }
